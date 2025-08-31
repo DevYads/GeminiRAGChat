@@ -47,16 +47,19 @@ class VectorStore:
                     contents=chunk.content
                 )
                 
-                if response and hasattr(response, 'embedding') and response.embedding:
-                    embedding = np.array(response.embedding)
-                    self.embeddings[chunk.chunk_id] = embedding
-                    
-                    # Set dimension on first embedding
-                    if self.dimension is None:
-                        self.dimension = len(embedding)
-                    
-                    # Also store embedding in chunk model for potential serialization
-                    chunk.embedding = embedding.tolist()
+                if response and hasattr(response, 'embeddings') and response.embeddings:
+                    # Get the first embedding from the response
+                    embedding_obj = response.embeddings[0]
+                    if embedding_obj and hasattr(embedding_obj, 'values'):
+                        embedding = np.array(embedding_obj.values)
+                        self.embeddings[chunk.chunk_id] = embedding
+                        
+                        # Set dimension on first embedding
+                        if self.dimension is None:
+                            self.dimension = len(embedding)
+                        
+                        # Also store embedding in chunk model for potential serialization
+                        chunk.embedding = embedding.tolist()
                 
             except Exception as e:
                 print(f"Error generating embedding for chunk {chunk.chunk_id}: {str(e)}")
@@ -84,10 +87,15 @@ class VectorStore:
                 contents=query
             )
             
-            if not response or not hasattr(response, 'embedding') or not response.embedding:
+            if not response or not hasattr(response, 'embeddings') or not response.embeddings:
                 return []
             
-            query_embedding = np.array(response.embedding)
+            # Get the first embedding from the response
+            embedding_obj = response.embeddings[0] if response.embeddings else None
+            if not embedding_obj or not hasattr(embedding_obj, 'values'):
+                return []
+            
+            query_embedding = np.array(embedding_obj.values)
             
             # Calculate similarities
             similarities = []
