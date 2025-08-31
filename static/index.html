@@ -244,6 +244,7 @@
         document.addEventListener('DOMContentLoaded', function() {
             refreshStats();
             setupUploadArea();
+            loadSessionFromStorage();
         });
 
         function setupUploadArea() {
@@ -308,6 +309,9 @@
 
                 const data = await response.json();
                 currentSessionId = data.session_id;
+                
+                // Save session ID to localStorage for persistence
+                localStorage.setItem('currentSessionId', currentSessionId);
 
                 // Add bot response to chat
                 addMessageToChat('bot', data.response, data.sources);
@@ -482,6 +486,8 @@
 
                 if (response.ok) {
                     currentSessionId = null;
+                    // Clear from localStorage as well
+                    localStorage.removeItem('currentSessionId');
                     const chatMessages = document.getElementById('chatMessages');
                     chatMessages.innerHTML = `
                         <div class="message bot-message">
@@ -495,6 +501,34 @@
             } catch (error) {
                 console.error('Error clearing chat:', error);
                 alert('Error clearing chat history: ' + error.message);
+            }
+        }
+
+        async function loadSessionFromStorage() {
+            // Try to restore previous session
+            const savedSessionId = localStorage.getItem('currentSessionId');
+            if (savedSessionId) {
+                try {
+                    const response = await fetch(`/api/chat/history/${savedSessionId}`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        currentSessionId = savedSessionId;
+                        
+                        // Clear current messages except welcome message
+                        const chatMessages = document.getElementById('chatMessages');
+                        chatMessages.innerHTML = '';
+                        
+                        // Add welcome message
+                        addMessageToChat('bot', "Welcome back! Here's your conversation history:");
+                        
+                        // Load previous messages
+                        data.messages.forEach(msg => {
+                            addMessageToChat(msg.role, msg.content);
+                        });
+                    }
+                } catch (error) {
+                    console.log('No previous session found or error loading history');
+                }
             }
         }
     </script>

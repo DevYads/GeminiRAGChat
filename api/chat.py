@@ -35,7 +35,7 @@ async def send_message(request: ChatRequest, app_request: Request):
         session_id = chat_service.create_session(request.session_id)
         
         # Add user message to conversation history
-        chat_service.add_message(session_id, "user", request.message)
+        chat_service.add_message(session_id, "user", request.message, request.use_rag)
         
         # Get conversation context
         conversation_history = chat_service.get_context_for_llm(session_id)
@@ -76,7 +76,7 @@ async def send_message(request: ChatRequest, app_request: Request):
         )
         
         # Add assistant response to conversation history
-        chat_service.add_message(session_id, "assistant", response_text)
+        chat_service.add_message(session_id, "assistant", response_text, request.use_rag)
         
         return ChatResponse(
             response=response_text,
@@ -155,14 +155,32 @@ async def list_sessions():
     List all active chat sessions
     
     Returns:
-        List of active session IDs
+        List of active session IDs with recent activity
     """
     try:
-        sessions = chat_service.get_all_sessions()
-        return {
-            "sessions": sessions,
-            "total_sessions": len(sessions)
-        }
+        from database import SessionLocal, ConversationSession
+        
+        db = SessionLocal()
+        try:
+            sessions = db.query(ConversationSession).filter(
+                ConversationSession.is_active == True
+            ).order_by(ConversationSession.updated_at.desc()).limit(20).all()
+            
+            session_data = []
+            for session in sessions:
+                session_data.append({
+                    "session_id": session.session_id,
+                    "created_at": session.created_at.isoformat(),
+                    "updated_at": session.updated_at.isoformat()
+                })
+            
+            return {
+                "sessions": session_data,
+                "total_sessions": len(session_data)
+            }
+            
+        finally:
+            db.close()
         
     except Exception as e:
         raise HTTPException(

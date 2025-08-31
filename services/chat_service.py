@@ -4,15 +4,15 @@ Chat service for managing conversation history and context
 import uuid
 from typing import Dict, List, Optional
 from datetime import datetime
+from sqlalchemy.orm import Session
 
 from models import ChatMessage, ConversationHistory
+from database import get_db, ConversationMessage, ConversationSession, SessionLocal
 
 class ChatService:
     """Service for managing chat conversations and history"""
     
     def __init__(self):
-        # In-memory storage for conversations (in production, use a database)
-        self.conversations: Dict[str, ConversationHistory] = {}
         self.max_context_messages = 10  # Limit context to last 10 messages
     
     def create_session(self, session_id: Optional[str] = None) -> str:
@@ -28,17 +28,30 @@ class ChatService:
         if not session_id:
             session_id = str(uuid.uuid4())
         
-        if session_id not in self.conversations:
-            self.conversations[session_id] = ConversationHistory(
-                session_id=session_id,
-                messages=[],
-                created_at=datetime.now(),
-                updated_at=datetime.now()
-            )
+        db = SessionLocal()
+        try:
+            # Check if session exists
+            existing_session = db.query(ConversationSession).filter(
+                ConversationSession.session_id == session_id
+            ).first()
+            
+            if not existing_session:
+                # Create new session
+                new_session = ConversationSession(
+                    session_id=session_id,
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                    is_active=True
+                )
+                db.add(new_session)
+                db.commit()
+                
+        finally:
+            db.close()
         
         return session_id
     
-    def add_message(self, session_id: str, role: str, content: str) -> None:
+    def add_message(self, session_id: str, role: str, content: str, use_rag: bool = True) -> None:
         """
         Add a message to the conversation history
         
@@ -46,24 +59,34 @@ class ChatService:
             session_id: Session identifier
             role: Message role (user/assistant)
             content: Message content
+            use_rag: Whether RAG was used for this message
         """
-        if session_id not in self.conversations:
+        db = SessionLocal()
+        try:
+            # Ensure session exists
             self.create_session(session_id)
-        
-        message = ChatMessage(
-            role=role,
-            content=content,
-            timestamp=datetime.now()
-        )
-        
-        self.conversations[session_id].messages.append(message)
-        self.conversations[session_id].updated_at = datetime.now()
-        
-        # Keep only the last N messages to manage context size
-        if len(self.conversations[session_id].messages) > self.max_context_messages * 2:
-            # Keep last max_context_messages pairs (user + assistant)
-            self.conversations[session_id].messages = \
-                self.conversations[session_id].messages[-self.max_context_messages * 2:]
+            
+            # Add message to database
+            message = ConversationMessage(
+                session_id=session_id,
+                role=role,
+                content=content,
+                timestamp=datetime.utcnow(),
+                use_rag=use_rag
+            )
+            db.add(message)
+            
+            # Update session timestamp
+            session = db.query(ConversationSession).filter(
+                ConversationSession.session_id == session_id
+            ).first()
+            if session:
+                session.updated_at = datetime.utcnow()
+            
+            db.commit()
+            
+        finally:
+            db.close()
     
     def get_conversation_history(self, session_id: str) -> List[ChatMessage]:
         """
@@ -75,10 +98,27 @@ class ChatService:
         Returns:
             List of chat messages
         """
-        if session_id not in self.conversations:
-            return []
-        
-        return self.conversations[session_id].messages
+        db = SessionLocal()
+        try:
+            # Get messages from database
+            db_messages = db.query(ConversationMessage).filter(
+                ConversationMessage.session_id == session_id
+            ).order_by(ConversationMessage.timestamp).all()
+            
+            # Convert to ChatMessage objects
+            messages = []
+            for db_msg in db_messages:
+                message = ChatMessage(
+                    role=db_msg.role,
+                    content=db_msg.content,
+                    timestamp=db_msg.timestamp
+                )
+                messages.append(message)
+            
+            return messages
+            
+        finally:
+            db.close()
     
     def get_context_for_llm(self, session_id: str) -> List[Dict[str, str]]:
         """
@@ -90,17 +130,28 @@ class ChatService:
         Returns:
             List of message dictionaries formatted for LLM
         """
-        messages = self.get_conversation_history(session_id)
-        
-        # Convert to format expected by LLM
-        context = []
-        for message in messages[-self.max_context_messages:]:  # Last N messages
-            context.append({
-                "role": message.role,
-                "content": message.content
-            })
-        
-        return context
+        db = SessionLocal()
+        try:
+            # Get recent messages from database
+            db_messages = db.query(ConversationMessage).filter(
+                ConversationMessage.session_id == session_id
+            ).order_by(ConversationMessage.timestamp.desc()).limit(self.max_context_messages).all()
+            
+            # Reverse to get chronological order
+            db_messages.reverse()
+            
+            # Convert to format expected by LLM
+            context = []
+            for db_msg in db_messages:
+                context.append({
+                    "role": db_msg.role,
+                    "content": db_msg.content
+                })
+            
+            return context
+            
+        finally:
+            db.close()
     
     def clear_session(self, session_id: str) -> bool:
         """
@@ -112,10 +163,30 @@ class ChatService:
         Returns:
             True if session was cleared, False if session didn't exist
         """
-        if session_id in self.conversations:
-            del self.conversations[session_id]
+        db = SessionLocal()
+        try:
+            # Check if session exists
+            session = db.query(ConversationSession).filter(
+                ConversationSession.session_id == session_id
+            ).first()
+            
+            if not session:
+                return False
+            
+            # Delete all messages for this session
+            db.query(ConversationMessage).filter(
+                ConversationMessage.session_id == session_id
+            ).delete()
+            
+            # Mark session as inactive (or delete it)
+            session.is_active = False
+            session.updated_at = datetime.utcnow()
+            
+            db.commit()
             return True
-        return False
+            
+        finally:
+            db.close()
     
     def get_all_sessions(self) -> List[str]:
         """
@@ -124,7 +195,15 @@ class ChatService:
         Returns:
             List of session IDs
         """
-        return list(self.conversations.keys())
+        db = SessionLocal()
+        try:
+            sessions = db.query(ConversationSession).filter(
+                ConversationSession.is_active == True
+            ).all()
+            return [session.session_id for session in sessions]
+            
+        finally:
+            db.close()
     
     def session_exists(self, session_id: str) -> bool:
         """
@@ -136,4 +215,13 @@ class ChatService:
         Returns:
             True if session exists, False otherwise
         """
-        return session_id in self.conversations
+        db = SessionLocal()
+        try:
+            session = db.query(ConversationSession).filter(
+                ConversationSession.session_id == session_id,
+                ConversationSession.is_active == True
+            ).first()
+            return session is not None
+            
+        finally:
+            db.close()

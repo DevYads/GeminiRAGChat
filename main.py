@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from api.chat import router as chat_router
 from api.documents import router as documents_router
 from services.vector_store import VectorStore
+from database import create_tables
 
 # Load environment variables
 load_dotenv()
@@ -36,6 +37,13 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup"""
+    # Initialize database tables
+    try:
+        create_tables()
+        print("✅ Database tables initialized")
+    except Exception as e:
+        print(f"⚠️  Warning: Database initialization failed: {str(e)}")
+    
     # Initialize vector store singleton
     vector_store = VectorStore()
     app.state.vector_store = vector_store
